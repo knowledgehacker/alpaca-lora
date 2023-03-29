@@ -7,15 +7,9 @@ import torch.nn as nn
 import bitsandbytes as bnb
 from datasets import load_dataset
 import transformers
-from transformers import AutoTokenizer, AutoConfig, LLaMAForCausalLM, LLaMATokenizer
+from transformers import AutoTokenizer, AutoConfig, AutoModelForCausalLM#, LLaMAForCausalLM, LLaMATokenizer
 from peft import prepare_model_for_int8_training, LoraConfig, get_peft_model
 
-
-pretrained_llm = "decapoda-research/llama-7b-hf"
-#pretrained_llm = "facebook/opt-6.7b"
-
-model_dir = "models"
-model_name = "alpaca7B-lora"
 
 # Setting for A100 - For 3090
 MICRO_BATCH_SIZE = 8  # change to 4 for 3090
@@ -28,9 +22,13 @@ LORA_R = 4
 LORA_ALPHA = 16
 LORA_DROPOUT = 0.05
 
+#pretrained_llm = "decapoda-research/llama-7b-hf"
+pretrained_llm = "facebook/opt-6.7b"
 
-# load dataset
-print("Load dataset...")
+model_dir = "models"
+model_name = "alpaca7B-lora"
+
+# load dataset and tokenize
 def generate_prompt(data_point):
     # sorry about the formatting disaster gotta move fast
     if data_point["input"]:
@@ -49,13 +47,13 @@ def generate_prompt(data_point):
 {data_point["output"]}"""
 
 
-data = load_dataset("json", data_files="alpaca_data.json")
-
-# tokenize
-print("Tokenize...")
-tokenizer = LLaMATokenizer.from_pretrained(pretrained_llm, add_eos_token=True)
+#tokenizer = LLaMATokenizer.from_pretrained(pretrained_llm, add_eos_token=True)
+tokenizer = AutoTokenizer.from_pretrained(pretrained_llm)
 tokenizer.pad_token_id = 0  # unk. we want this to be different from the eos token
 
+print("Load dataset and tokenize...")
+
+data = load_dataset("json", data_files="alpaca_data.json")
 data = data.shuffle().map(
     lambda data_point: tokenizer(
         generate_prompt(data_point),
@@ -64,6 +62,10 @@ data = data.shuffle().map(
         padding="max_length",
     )
 )
+"""
+data = load_dataset("Abirate/english_quotes")
+data = data.map(lambda samples: tokenizer(samples['quote']), batched=True)
+"""
 
 # fine tinue
 print("Fine tuning...")
@@ -75,13 +77,33 @@ config = LoraConfig(
     bias="none",
     task_type="CAUSAL_LM",
 )
-model = LLaMAForCausalLM.from_pretrained(
+#model = LLaMAForCausalLM.from_pretrained(
+model = AutoModelForCausalLM.from_pretrained(
     pretrained_llm,
     load_in_8bit=True,
     device_map="auto",
 )
 model = prepare_model_for_int8_training(model)
 model = get_peft_model(model, config)
+
+
+# statistics about ratio of trainable to total parameters
+def print_trainable_parameters(model):
+    """
+    Prints the number of trainable parameters in the model.
+    """
+    trainable_params = 0
+    all_param = 0
+    for _, param in model.named_parameters():
+        all_param += param.numel()
+        if param.requires_grad:
+            trainable_params += param.numel()
+    print(
+        f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param}"
+    )
+
+
+print_trainable_parameters(model)
 
 trainer = transformers.Trainer(
     model=model,
